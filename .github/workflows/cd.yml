@@ -1,0 +1,99 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+jobs:
+  production:
+    name: Build release and deploy
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, intl, pdo_mysql, xml, dom, fileinfo
+          coverage: none
+          tools: composer:v2
+
+      - name: Production PHP dependencies
+        run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+      - name: Production dependency audit
+        run: composer audit --locked --no-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Build frontend assets
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+          npm run build
+
+      - name: Prepare Laravel release folders
+        shell: bash
+        run: |
+          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
+          rm -f .env
+          rm -rf node_modules
+
+      - name: Create release archive
+        shell: bash
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='tests' \
+            --exclude='database/database.sqlite' \
+            --exclude='database/dast.sqlite' \
+            --exclude='storage/logs/*' \
+            -czf alerte-catastrophe-release.tar.gz .
+
+      - name: Upload production artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: alerte-catastrophe-production
+          path: alerte-catastrophe-release.tar.gz
+          retention-days: 14
+
+      - name: Trigger Render deployment when configured
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        shell: bash
+        run: |
+          if [ -z "${RENDER_DEPLOY_HOOK_URL}" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL is not configured."
+            echo "The production artifact was built successfully, but no remote deployment was triggered."
+            exit 0
+          fi
+
+          curl --fail --show-error --silent \
+            --request POST \
+            "${RENDER_DEPLOY_HOOK_URL}"
+          echo "Render deployment triggered successfully."

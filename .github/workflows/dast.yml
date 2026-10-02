@@ -1,0 +1,127 @@
+name: DAST
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zap:
+    name: OWASP ZAP baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, intl, pdo_sqlite, sqlite3, xml, dom, fileinfo
+          coverage: none
+          tools: composer:v2
+
+      - name: Install application dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare isolated DAST environment
+        shell: bash
+        run: |
+          cat > .env <<EOF
+          APP_NAME="Alerte Catastrophe"
+          APP_ENV=testing
+          APP_KEY=
+          APP_DEBUG=false
+          APP_URL=http://127.0.0.1:8000
+          APP_LOCALE=fr
+          APP_FALLBACK_LOCALE=fr
+          LOG_CHANNEL=single
+          LOG_LEVEL=warning
+          DB_CONNECTION=sqlite
+          DB_DATABASE=${GITHUB_WORKSPACE}/database/dast.sqlite
+          SESSION_DRIVER=file
+          CACHE_STORE=file
+          QUEUE_CONNECTION=sync
+          FILESYSTEM_DISK=local
+          MAIL_MAILER=array
+          BCRYPT_ROUNDS=4
+          EOF
+
+          rm -f database/dast.sqlite
+          touch database/dast.sqlite
+          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
+          chmod -R u+rwX storage bootstrap/cache
+          php artisan key:generate --force
+          php artisan migrate --force
+          php artisan optimize:clear
+
+      - name: Start Laravel server
+        shell: bash
+        run: |
+          nohup php artisan serve --host=0.0.0.0 --port=8000 > storage/logs/dast-server.log 2>&1 &
+          echo $! > /tmp/laravel-dast.pid
+
+          for i in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8000/ > /dev/null; then
+              echo "Laravel is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Laravel did not start in time"
+          cat storage/logs/dast-server.log || true
+          exit 1
+
+      - name: OWASP ZAP baseline scan
+        shell: bash
+        run: |
+          docker run --rm --network host \
+            -v "$PWD:/zap/wrk/:rw" \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -t http://127.0.0.1:8000 \
+              -r zap-report.html \
+              -J zap-report.json \
+              -w zap-report.md \
+              -I
+
+      - name: Fail on High-risk ZAP findings
+        shell: bash
+        run: |
+          if [ ! -f zap-report.json ]; then
+            echo "ZAP JSON report is missing"
+            exit 1
+          fi
+
+          HIGH_COUNT=$(jq '[.site[]?.alerts[]? | select((.riskcode | tonumber) >= 3)] | length' zap-report.json)
+          echo "High-risk findings: ${HIGH_COUNT}"
+
+          if [ "${HIGH_COUNT}" -gt 0 ]; then
+            echo "DAST failed because ZAP found High-risk issues."
+            exit 1
+          fi
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: zap-dast-report
+          path: |
+            zap-report.html
+            zap-report.json
+            zap-report.md
+            storage/logs/dast-server.log
+          if-no-files-found: ignore
+          retention-days: 14

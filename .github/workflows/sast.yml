@@ -1,0 +1,123 @@
+name: SAST
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Gitleaks - secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Scan Git history for secrets
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  semgrep:
+    name: Semgrep - source code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run Semgrep
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            semgrep/semgrep \
+            semgrep scan \
+              --config auto \
+              --severity ERROR \
+              --error \
+              --json \
+              --output /src/semgrep.json \
+              /src/app /src/routes /src/config /src/database
+
+      - name: Upload Semgrep report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semgrep-report
+          path: semgrep.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  dependencies:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          coverage: none
+
+      - name: Composer security audit
+        run: composer audit --locked --no-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Prepare npm lockfile for audit
+        shell: bash
+        run: |
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          fi
+
+      - name: npm security audit
+        run: npm audit --audit-level=high
+
+  trivy:
+    name: Trivy - vulnerabilities / secrets / misconfiguration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+          output: trivy-report.txt
+          skip-dirs: vendor,node_modules
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-report
+          path: trivy-report.txt
+          if-no-files-found: ignore
+          retention-days: 14

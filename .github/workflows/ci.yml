@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PHP_VERSION: '8.3'
+  NODE_VERSION: '24'
+
+jobs:
+  backend:
+    name: Laravel / PHP
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: catastrophe_ci
+          MYSQL_ROOT_PASSWORD: ci_root_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci_root_password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, intl, pdo_mysql, pdo_sqlite, sqlite3, xml, dom, fileinfo
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate Composer files
+        run: composer validate --strict
+
+      - name: Install PHP dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare Laravel
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
+          chmod -R u+rwX storage bootstrap/cache
+
+      - name: PHP syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          find app bootstrap config database routes tests -type f -name '*.php' -print0 \
+            | xargs -0 -n1 php -l
+
+      - name: Laravel Pint
+        run: vendor/bin/pint --test
+
+      - name: MySQL migration smoke test
+        env:
+          APP_ENV: testing
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: catastrophe_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ci_root_password
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+          QUEUE_CONNECTION: sync
+          MAIL_MAILER: array
+        run: php artisan migrate:fresh --force
+
+      - name: PHPUnit / Laravel tests
+        run: php artisan test --colors=always
+
+  frontend:
+    name: Frontend / Vite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Upload Vite build
+        uses: actions/upload-artifact@v7
+        with:
+          name: vite-build
+          path: public/build
+          if-no-files-found: error
+          retention-days: 7
