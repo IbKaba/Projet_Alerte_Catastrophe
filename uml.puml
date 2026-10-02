@@ -1,0 +1,81 @@
+@startuml AlerteCatastropheV3
+skinparam classAttributeIconSize 0
+
+enum Role {
+  citizen
+  moderator
+  admin
+}
+
+enum AlertStatus {
+  pending
+  validated
+  rejected
+  resolved
+}
+
+class User {
+  + id: bigint
+  + name: string
+  + email: string
+  + phone: string?
+  + password: string
+  + role: Role
+  + is_active: bool
+}
+
+class DisasterCategory {
+  + id: bigint
+  + name: string
+  + description: text?
+  + is_active: bool
+}
+
+class Disaster {
+  + id: bigint
+  + category_id: bigint
+  + name: string
+  + description: text?
+  + instructions: text?
+  + is_active: bool
+}
+
+class Alert {
+  + id: bigint
+  + user_id: bigint?
+  + disaster_id: bigint
+  + latitude: decimal
+  + longitude: decimal
+  + address: string?
+  + description: text
+  + status: AlertStatus
+  + validated_by: bigint?
+  + validated_at: datetime?
+  + resolved_at: datetime?
+}
+
+class AlertPhoto {
+  + id: bigint
+  + alert_id: bigint
+  + path: string
+  + original_name: string?
+  + position: int
+}
+
+class ActivityLog {
+  + id: bigint
+  + user_id: bigint?
+  + action: string
+  + entity_type: string?
+  + entity_id: bigint?
+  + metadata: json?
+  + ip_address: string?
+}
+
+DisasterCategory "1" -- "0..*" Disaster
+Disaster "1" -- "0..*" Alert
+User "0..1" -- "0..*" Alert : signale >
+User "0..1" -- "0..*" Alert : modère >
+Alert "1" -- "0..6" AlertPhoto
+User "0..1" -- "0..*" ActivityLog
+@enduml
