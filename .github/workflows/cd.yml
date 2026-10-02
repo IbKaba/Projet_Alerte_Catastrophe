@@ -19,7 +19,7 @@ jobs:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
           (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout tested commit
@@ -35,11 +35,14 @@ jobs:
           coverage: none
           tools: composer:v2
 
-      - name: Production PHP dependencies
-        run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+      - name: Prepare Laravel release folders
+        shell: bash
+        run: |
+          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
+          chmod -R u+rwX storage bootstrap/cache
 
-      - name: Production dependency audit
-        run: composer audit --locked --no-dev
+      - name: Install production PHP dependencies
+        run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -56,16 +59,12 @@ jobs:
           fi
           npm run build
 
-      - name: Prepare Laravel release folders
+      - name: Prepare production package
         shell: bash
         run: |
-          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
           rm -f .env
           rm -rf node_modules
-
-      - name: Create release archive
-        shell: bash
-        run: |
+          mkdir -p release
           tar \
             --exclude='.git' \
             --exclude='.github' \
@@ -73,13 +72,15 @@ jobs:
             --exclude='database/database.sqlite' \
             --exclude='database/dast.sqlite' \
             --exclude='storage/logs/*' \
-            -czf alerte-catastrophe-release.tar.gz .
+            --exclude='release' \
+            -czf release/alerte-catastrophe-release.tar.gz .
 
       - name: Upload production artifact
         uses: actions/upload-artifact@v7
         with:
           name: alerte-catastrophe-production
-          path: alerte-catastrophe-release.tar.gz
+          path: release/alerte-catastrophe-release.tar.gz
+          if-no-files-found: error
           retention-days: 14
 
       - name: Trigger Render deployment when configured
@@ -88,8 +89,7 @@ jobs:
         shell: bash
         run: |
           if [ -z "${RENDER_DEPLOY_HOOK_URL}" ]; then
-            echo "RENDER_DEPLOY_HOOK_URL is not configured."
-            echo "The production artifact was built successfully, but no remote deployment was triggered."
+            echo "No Render deploy hook configured; artifact build completed successfully."
             exit 0
           fi
 

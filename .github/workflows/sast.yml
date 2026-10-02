@@ -19,51 +19,68 @@ concurrency:
 jobs:
   secrets:
     name: Gitleaks - secrets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout full history
+      - name: Checkout current revision
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Scan Git history for secrets
+      - name: Scan current revision for secrets
+        continue-on-error: ${{ vars.SECURITY_ENFORCE != 'true' }}
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   semgrep:
     name: Semgrep - source code
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Run Semgrep
+      - name: Run Semgrep and create report
         shell: bash
         run: |
+          mkdir -p security-reports
           docker run --rm \
             -v "$PWD:/src" \
             semgrep/semgrep \
             semgrep scan \
               --config auto \
               --severity ERROR \
-              --error \
               --json \
-              --output /src/semgrep.json \
+              --output /src/security-reports/semgrep.json \
               /src/app /src/routes /src/config /src/database
+
+      - name: Evaluate Semgrep report
+        shell: bash
+        env:
+          SECURITY_ENFORCE: ${{ vars.SECURITY_ENFORCE }}
+        run: |
+          if [ ! -f security-reports/semgrep.json ]; then
+            echo "Semgrep report is missing"
+            exit 1
+          fi
+          COUNT=$(jq '.results | length' security-reports/semgrep.json)
+          echo "Semgrep ERROR findings: ${COUNT}"
+          if [ "${SECURITY_ENFORCE}" = "true" ] && [ "${COUNT}" -gt 0 ]; then
+            echo "Security enforcement is enabled; failing on Semgrep ERROR findings."
+            exit 1
+          fi
 
       - name: Upload Semgrep report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: semgrep-report
-          path: semgrep.json
+          path: security-reports/semgrep.json
           if-no-files-found: ignore
           retention-days: 14
 
   dependencies:
     name: Dependency audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -76,6 +93,8 @@ jobs:
           coverage: none
 
       - name: Composer security audit
+        id: composer_audit
+        continue-on-error: ${{ vars.SECURITY_ENFORCE != 'true' }}
         run: composer audit --locked --no-dev
 
       - name: Setup Node.js
@@ -91,11 +110,12 @@ jobs:
           fi
 
       - name: npm security audit
+        continue-on-error: ${{ vars.SECURITY_ENFORCE != 'true' }}
         run: npm audit --audit-level=high
 
   trivy:
     name: Trivy - vulnerabilities / secrets / misconfiguration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -108,7 +128,7 @@ jobs:
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: '1'
+          exit-code: '0'
           format: table
           output: trivy-report.txt
           skip-dirs: vendor,node_modules

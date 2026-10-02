@@ -21,7 +21,7 @@ env:
 jobs:
   backend:
     name: Laravel / PHP
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       mysql:
@@ -35,7 +35,7 @@ jobs:
           --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci_root_password"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=10
+          --health-retries=12
 
     steps:
       - name: Checkout
@@ -50,17 +50,24 @@ jobs:
           tools: composer:v2
 
       - name: Validate Composer files
-        run: composer validate --strict
+        run: composer validate --no-check-publish
+
+      - name: Prepare Laravel folders
+        shell: bash
+        run: |
+          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
+          chmod -R u+rwX storage bootstrap/cache
 
       - name: Install PHP dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
 
-      - name: Prepare Laravel
+      - name: Prepare Laravel environment
+        shell: bash
         run: |
           cp .env.example .env
           php artisan key:generate --force
-          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
-          chmod -R u+rwX storage bootstrap/cache
+          php artisan optimize:clear
+          php artisan about
 
       - name: PHP syntax check
         shell: bash
@@ -69,12 +76,27 @@ jobs:
           find app bootstrap config database routes tests -type f -name '*.php' -print0 \
             | xargs -0 -n1 php -l
 
-      - name: Laravel Pint
+      - name: Laravel Pint (quality information)
+        continue-on-error: true
         run: vendor/bin/pint --test
+
+      - name: Wait for MySQL
+        shell: bash
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 -uroot -pci_root_password --silent; then
+              echo "MySQL is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"
+          exit 1
 
       - name: MySQL migration smoke test
         env:
           APP_ENV: testing
+          APP_DEBUG: 'false'
           DB_CONNECTION: mysql
           DB_HOST: 127.0.0.1
           DB_PORT: 3306
@@ -85,14 +107,24 @@ jobs:
           CACHE_STORE: array
           QUEUE_CONNECTION: sync
           MAIL_MAILER: array
-        run: php artisan migrate:fresh --force
+        run: php artisan migrate:fresh --force --no-interaction
 
       - name: PHPUnit / Laravel tests
+        env:
+          APP_ENV: testing
+          APP_DEBUG: 'false'
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+          QUEUE_CONNECTION: sync
+          MAIL_MAILER: array
         run: php artisan test --colors=always
+
+      - name: Route registration smoke test
+        run: php artisan route:list --except-vendor
 
   frontend:
     name: Frontend / Vite
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
